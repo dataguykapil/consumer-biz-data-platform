@@ -171,6 +171,8 @@ How each source misbehaves, and what we do about it, is in **Appendix A**. The t
 - **Contracts.** Each table has an owner and a contract (grain, keys, column semantics). Each metric is defined once, in gold code.
 - **Lineage.** OpenLineage gives table-level lineage, and `_source_position` gives row-level lineage.
 
+Ownership, classification, masking and access audit are detailed in **Appendix C**.
+
 ## 6. Serving
 
 | Consumer | Gets | Freshness |
@@ -263,7 +265,7 @@ Each of the three parts below has code in `src/cdp/`. For each, every mechanism 
 - **Streaming.** Spark Structured Streaming runs on Kubernetes with 1–5 minute triggers.
 - **Batch.** Airflow runs files, APIs, gold builds and maintenance.
 - **Ad hoc SQL.** The Spark SQL endpoint has its own cluster and query timeouts.
-- **Paging** covers slot lag, consumer lag, freshness breaches, quarantines and reconciliation failures.
+- **Paging** covers slot lag, consumer lag, freshness breaches, quarantines and reconciliation failures. The full list of metrics, thresholds and severities is in **Appendix C**.
 
 **Table maintenance** is the recurring cost.
 - **Routine:** hourly compaction and delete-file rewrites on recent partitions, 7-day snapshot expiry (month-end tags exempt), and weekly orphan cleanup.
@@ -294,7 +296,7 @@ Failure-by-failure recovery is in **Appendix B**. In short, bronze is always the
 **Deliberately left out:**
 - *Business scope:* online feature serving; the Flink fraud path; cross-business identity; a semantic layer beyond "metrics defined once in gold".
 - *Metrics:* past-date state metrics (DPD, PAR, NPA, roll rates) and lifecycle durations. These need entity-history and daily snapshot tables. I checked the design against a list of lending, insurance and recharge metrics and chose not to widen scope.
-- *Operations:* a DR rehearsal, and legal retention versus erasure.
+- *Operations:* a DR rehearsal; legal retention versus erasure; the exact scope of RBI data-localisation rules. Appendix C's alert thresholds are starting values, not tested ones.
 - *Code:* the tombstone and ClickHouse purge jobs; the `source_ts` and `none` merge rules; delta-style partners.
 
 **Unsure:**
@@ -357,3 +359,48 @@ That process caught these errors in the first drafts:
 | Wrong partner file loaded | Load the corrected file, which is a restatement (§7.2) |
 | Catalog down | Commits stop, reads continue; Polaris HA plus backups |
 | Region lost | Replicated storage plus catalog backup. Iceberg's absolute paths make failover non-trivial, and it hasn't been rehearsed. |
+
+## Appendix C: Observability and governance
+
+### Metrics, alerts and who gets paged
+
+Spark, Kafka and ClickHouse all expose Prometheus metrics: Spark through its `PrometheusServlet` sink, Kafka through the JMX exporter, and ClickHouse through its built-in endpoint. A scheduled Spark job reads Iceberg's metadata tables (`files`, `snapshots`) and turns them into table-health metrics.
+
+Everything lands in Prometheus. Grafana draws the dashboards, and Alertmanager routes each alert by severity:
+- **P1:** page on-call now. Used for money correctness or a risk to production.
+- **P2:** page during business hours.
+- **Ticket:** handled in the next working day.
+
+Pipeline logs are structured JSON tagged with the run id, and OpenLineage events carry each run's status. The thresholds below are starting values, to be tuned.
+
+| Signal | Metric | Alert when | Severity, owner |
+|---|---|---|---|
+| Replication slot (§4) | WAL retained per slot | > 50% of `max_slot_wal_keep_size` | P1, platform |
+| Kafka consumer lag | Seconds behind, per topic | > 15 min on money topics (> 5 min: ticket) | P2, platform |
+| Streaming health | Batch duration vs. trigger interval | Longer than the trigger for 3 batches in a row, which means it's falling behind | P2, platform |
+| Freshness | Now minus the table's watermark | Past its SLO (for example 30 min operational, 09:00 for daily finance) | P1 money / P2 other, table owner |
+| Reconciliation | Failed gate runs (`ops.reconciliation_log`) | Any failure on a money table | P1, domain owner |
+| Quarantine | Files and rows quarantined per source per day | Any money file quarantined; a spike elsewhere | P2, source owner |
+| Missed arrival | Expected partner file not received | Past its SLA plus a grace period | P2, partner ops |
+| Volume drift | Rows in vs. out per batch and per day | Zero rows, or a change beyond 3σ of the last 28 days | Ticket, domain owner |
+| Write contention | Iceberg commit conflicts and retries per table | Retries exhausted (P2); a rising trend (ticket) | Platform |
+| Table health | Small files, delete files and snapshots per partition | Above threshold: run targeted compaction, open a ticket | Platform |
+| Serving | App read API p99 latency (ClickHouse) | > 200 ms for 5 min | P2, platform |
+| Catalog | Polaris availability, commit latency | Down or erroring | P1, platform |
+| Cost | Compute and storage per pipeline per day | +30% week over week | Ticket, owner |
+
+Quarantine counts, reconciliation verdicts and freshness together make a **per-table quality scorecard** in Grafana, so owners see trends, not just incidents.
+
+### Governance
+
+- **Ownership.** Each domain (lending, insurance, recharge) owns its silver and gold tables and names a data steward. The platform team owns bronze, landing and the tooling.
+- **Classification.** Every column carries a sensitivity tag in its contract: public, internal, confidential or restricted-PII. CI fails a contract with an untagged column, so new data can't enter unclassified.
+- **Masking and row-level access.**
+  - *Tokens by default:* restricted columns are visible only as tokens. Turning a token back into a value goes through the vault service, which requires a stated purpose and is logged.
+  - *Where rules live:* Polaris grants access per namespace and table. Row filters (for example, lending analysts see lending rows) and column masks are enforced by governed views in Spark SQL, and by ClickHouse row policies and column grants.
+- **Access requests and reviews.** Access is requested via a ticket, approved by the table owner, and time-limited. Grants are reviewed quarterly.
+- **Access audit.** Catalog access logs, Spark event logs and ClickHouse `system.query_log` are shipped to append-only storage, so "who read this table, and when?" has an answer for auditors.
+- **Contract changes.** Contracts live as code in the repo. A breaking change needs sign-off from its consumers. For streams, Schema Registry compatibility rules enforce the same thing automatically.
+- **Discovery and glossary.** A catalog UI (for example DataHub or OpenMetadata), fed by Polaris and OpenLineage, lets people find tables, owners and lineage. Glossary terms link to the single gold definition of each metric.
+- **Data localisation.** All storage, compute and the DR region stay in Indian cloud regions. RBI's rules on payment-data storage and digital lending very likely require this for recharge and lending data. The exact scope needs confirming with compliance.
+- **Retention and legal hold.** Expiry jobs apply the retention policy for each table class. A legal hold overrides expiry for named records.
