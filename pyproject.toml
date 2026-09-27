@@ -2,16 +2,22 @@
 name = "cdp"
 version = "0.1.0"
 description = "Consumer data platform lakehouse"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     # Pinned to the newest Spark line that has a matching Iceberg runtime
-    # (iceberg-spark-runtime-4.1_2.13:1.11.0). Keep these two in lockstep.
+    # (iceberg-spark-runtime-4.1_2.13:1.11.0). Keep these two in lockstep;
+    # PySpark 4.2 exists but Iceberg does not ship a 4.2 runtime yet.
     "pyspark==4.1.3",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
+    "pytest==9.1.1",
+    "ruff==0.16.9",
+    "pre-commit==4.6.2",
+    "pip-audit==2.10.1",
+    "bandit==1.9.4",
 ]
 
 [build-system]
@@ -24,3 +30,15 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, bugbear, pyupgrade, simplify
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
+
+[tool.bandit]
+exclude_dirs = ["tests", ".venv", ".tools"]

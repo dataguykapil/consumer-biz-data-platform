@@ -6,12 +6,17 @@ same Iceberg table-format behaviour either way.
 """
 
 import os
+import sys
 import uuid
 
 import pytest
 from pyspark.sql import SparkSession
 
 ICEBERG_COORDINATE = "org.apache.iceberg:iceberg-spark-runtime-4.1_2.13:1.11.0"
+
+# Python workers must run the same interpreter as the driver; otherwise Spark picks
+# whatever `python3` is on PATH and fails on a minor-version mismatch.
+os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 
 
 @pytest.fixture(scope="session")

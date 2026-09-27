@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      dev-tools:
+        patterns: [pytest, ruff, pre-commit, pip-audit, bandit]
+    ignore:
+      # PySpark must move in lockstep with Iceberg's Spark runtime (4.1 today); bump both by hand.
+      - dependency-name: pyspark
+        update-types: [version-update:semver-minor, version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # JDK major versions follow Spark's supported list (17/21 for Spark 4.1), not the newest LTS.
+      - dependency-name: eclipse-temurin
+        update-types: [version-update:semver-major]

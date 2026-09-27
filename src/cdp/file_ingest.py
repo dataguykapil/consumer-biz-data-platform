@@ -29,8 +29,8 @@ from __future__ import annotations
 import enum
 import functools
 import hashlib
-import operator
 import json
+import operator
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -46,11 +46,11 @@ _COMMIT_ATTEMPTS = 3
 
 
 class Outcome(enum.Enum):
-    LOADED = "LOADED"                  # this call committed the file
+    LOADED = "LOADED"  # this call committed the file
     ALREADY_LOADED = "ALREADY_LOADED"  # these bytes were already committed
-    SUPERSEDED = "SUPERSEDED"          # a newer version of the delivery is already loaded
+    SUPERSEDED = "SUPERSEDED"  # a newer version of the delivery is already loaded
     QUARANTINED = "QUARANTINED"
-    NOT_CLAIMED = "NOT_CLAIMED"        # another worker holds the claim
+    NOT_CLAIMED = "NOT_CLAIMED"  # another worker holds the claim
 
 
 @dataclass(frozen=True)
@@ -84,8 +84,12 @@ class Trailer:
     def read(cls, path: str) -> Trailer:
         with open(path) as f:
             raw = json.load(f)
-        return cls(int(raw["row_count"]), int(raw["total_paise"]), int(raw["distinct_keys"]),
-                   datetime.fromisoformat(raw["generated_at"]))
+        return cls(
+            int(raw["row_count"]),
+            int(raw["total_paise"]),
+            int(raw["distinct_keys"]),
+            datetime.fromisoformat(raw["generated_at"]),
+        )
 
 
 class Manifest(Protocol):
@@ -116,7 +120,9 @@ def sha256_of(path: str, chunk: int = 8 << 20) -> str:
     return digest.hexdigest()
 
 
-def validate(raw: DataFrame, contract: FileContract, delivery: Delivery, trailer: Trailer) -> tuple[DataFrame, list[str]]:
+def validate(
+    raw: DataFrame, contract: FileContract, delivery: Delivery, trailer: Trailer
+) -> tuple[DataFrame, list[str]]:
     """Type the all-string file against its contract, in one aggregation pass.
 
     Returns (typed rows, failures). Any failure quarantines the whole file.
@@ -135,12 +141,15 @@ def validate(raw: DataFrame, contract: FileContract, delivery: Delivery, trailer
         F.count_distinct(*contract.key_columns).alias("keys"),
         F.sum(any_null_key.cast("int")).alias("null_keys"),
         F.sum((F.col(contract.date_column) != F.lit(delivery.business_date)).cast("int")).alias("wrong_date"),
-        *(F.sum((F.col(f"_raw_{c}").isNotNull() & F.col(c).isNull()).cast("int")).alias(f"bad_{c}")
-          for c in contract.columns),
+        *(
+            F.sum((F.col(f"_raw_{c}").isNotNull() & F.col(c).isNull()).cast("int")).alias(f"bad_{c}")
+            for c in contract.columns
+        ),
     ).first()
 
-    failures = [f"{stats[f'bad_{c}']} values in {c} are not {t}"
-                for c, t in contract.columns.items() if stats[f"bad_{c}"]]
+    failures = [
+        f"{stats[f'bad_{c}']} values in {c} are not {t}" for c, t in contract.columns.items() if stats[f"bad_{c}"]
+    ]
     if stats["null_keys"]:
         failures.append(f"{stats['null_keys']} rows with a null key")
     if stats["keys"] != stats["rows"] - (stats["null_keys"] or 0):
@@ -168,16 +177,17 @@ def restatement_merge_sql(contract: FileContract, delivery: Delivery, staged: st
         raise ValueError(f"invalid partner id {delivery.partner!r}")
     cols = list(contract.columns)
     delivery_filter = f"x.partner = p.partner AND x.{contract.date_column} = p.business_date"
+    param_cols = "p.partner, p.sha256, p.generated_at, p.recorded_at"
     key_match = " AND ".join(f"t.{k} = s.{k}" for k in contract.key_columns)
     return f"""
         MERGE INTO {contract.table} t
         USING (
-            SELECT 'insert' AS _action, {", ".join(f"f.{c}" for c in cols)}, p.partner, p.sha256, p.generated_at, p.recorded_at
+            SELECT 'insert' AS _action, {", ".join(f"f.{c}" for c in cols)}, {param_cols}
             FROM {staged} f CROSS JOIN {params} p
             WHERE NOT EXISTS (SELECT 1 FROM {contract.table} x
                               WHERE {delivery_filter} AND x.file_generated_at >= p.generated_at)
             UNION ALL
-            SELECT 'close', {", ".join(f"x.{c}" for c in cols)}, p.partner, p.sha256, p.generated_at, p.recorded_at
+            SELECT 'close', {", ".join(f"x.{c}" for c in cols)}, {param_cols}
             FROM {contract.table} x JOIN {params} p ON {delivery_filter}
             WHERE x.recorded_to IS NULL AND x.file_generated_at < p.generated_at
         ) s
@@ -187,11 +197,18 @@ def restatement_merge_sql(contract: FileContract, delivery: Delivery, staged: st
         WHEN NOT MATCHED AND s._action = 'insert' THEN INSERT
             ({", ".join(cols)}, partner, file_sha256, file_generated_at, recorded_from, recorded_to)
             VALUES ({", ".join(f"s.{c}" for c in cols)}, s.partner, s.sha256, s.generated_at, s.recorded_at, NULL)
-    """
+    """  # nosec B608: identifiers come from trusted config/validated ids, never row data
 
 
-def _commit(spark: SparkSession, contract: FileContract, delivery: Delivery, typed: DataFrame,
-            sha: str, trailer: Trailer, recorded_at: datetime) -> None:
+def _commit(
+    spark: SparkSession,
+    contract: FileContract,
+    delivery: Delivery,
+    typed: DataFrame,
+    sha: str,
+    trailer: Trailer,
+    recorded_at: datetime,
+) -> None:
     staged, params = f"staged_{sha[:16]}", f"delivery_{sha[:16]}"  # session-scoped, see ingest_file
     typed.createOrReplaceTempView(staged)
     spark.createDataFrame(
@@ -219,8 +236,9 @@ def _is_commit_conflict(e: Exception) -> bool:
     return "ValidationException" in text or "CommitFailedException" in text
 
 
-def _outcome(spark: SparkSession, contract: FileContract, delivery: Delivery, trailer: Trailer,
-             sha: str, recorded_at: datetime) -> Outcome:
+def _outcome(
+    spark: SparkSession, contract: FileContract, delivery: Delivery, trailer: Trailer, sha: str, recorded_at: datetime
+) -> Outcome:
     """Classify from the table itself, so a retry after a crash reports correctly.
 
     A snapshot carrying our sha is not proof of a load: a MERGE that inserts
@@ -228,17 +246,30 @@ def _outcome(spark: SparkSession, contract: FileContract, delivery: Delivery, tr
     """
     spark.catalog.refreshTable(contract.table)  # see commits from other sessions too
     delivery_rows = spark.table(contract.table).where(
-        (F.col("partner") == delivery.partner) & (F.col(contract.date_column) == F.lit(delivery.business_date)))
-    if delivery_rows.where(F.col("recorded_to").isNull()
-                           & (F.col("file_generated_at") > F.lit(trailer.generated_at))).limit(1).count():
+        (F.col("partner") == delivery.partner) & (F.col(contract.date_column) == F.lit(delivery.business_date))
+    )
+    if (
+        delivery_rows.where(F.col("recorded_to").isNull() & (F.col("file_generated_at") > F.lit(trailer.generated_at)))
+        .limit(1)
+        .count()
+    ):
         return Outcome.SUPERSEDED
-    loaded_now = delivery_rows.where((F.col("file_sha256") == sha)
-                                     & (F.col("recorded_from") == F.lit(recorded_at))).limit(1).count()
+    loaded_now = (
+        delivery_rows.where((F.col("file_sha256") == sha) & (F.col("recorded_from") == F.lit(recorded_at)))
+        .limit(1)
+        .count()
+    )
     return Outcome.LOADED if loaded_now else Outcome.ALREADY_LOADED
 
 
-def ingest_file(spark: SparkSession, delivery: Delivery, contract: FileContract, manifest: Manifest,
-                worker: str, recorded_at: datetime | None = None) -> Outcome:
+def ingest_file(
+    spark: SparkSession,
+    delivery: Delivery,
+    contract: FileContract,
+    manifest: Manifest,
+    worker: str,
+    recorded_at: datetime | None = None,
+) -> Outcome:
     # Own session: the snapshot property and temp views are session state, and a
     # worker may run several ingests at once.
     spark = spark.newSession()
@@ -258,7 +289,6 @@ def ingest_file(spark: SparkSession, delivery: Delivery, contract: FileContract,
     outcome = _outcome(spark, contract, delivery, trailer, sha, recorded_at)
     manifest.mark(sha, outcome.value)  # a crash before this line is fine: the retry lands in ALREADY_LOADED
     return outcome
-
 
 
 def as_of(spark: SparkSession, table: str, t: datetime) -> DataFrame:
