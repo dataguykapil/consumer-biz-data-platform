@@ -55,10 +55,12 @@ test: setup
 # Everything CI runs, except the Docker build and CodeQL.
 check: lint security test
 
-# Render the Mermaid architecture diagram embedded in docs/design.md to a PNG.
+# Render the two Mermaid diagrams in docs/design.md (§3.1 containers, §3.2 data flow) to PNGs.
 diagram:
-	awk '/^```mermaid/{f=1;next} /^```/{f=0} f' docs/design.md > .tools/architecture.mmd
-	PATH=$(NODE_BIN):$$PATH $(MMDC) -i .tools/architecture.mmd -o docs/architecture.png -s 2
+	mkdir -p .tools/diagrams
+	awk '/^```mermaid/{n++; f=1; next} /^```/{f=0} f{print > (".tools/diagrams/design-" n ".mmd")}' docs/design.md
+	PATH=$(NODE_BIN):$$PATH $(MMDC) -i .tools/diagrams/design-1.mmd -o docs/architecture-containers.png -s 2
+	PATH=$(NODE_BIN):$$PATH $(MMDC) -i .tools/diagrams/design-2.mmd -o docs/architecture-dataflow.png -s 2
 
 docker-build:
 	docker build -t cdp-test .

@@ -92,7 +92,7 @@ Each test below was run once, by hand, against a local Iceberg table using a thr
 
 These would come next, in order of risk:
 
-1. **Real ClickHouse (Docker Compose).** The `FINAL`, `uniqExact` and `{seq:UInt64}` parameter SQL has never run against real ClickHouse. Nor has the multi-version view.
+1. **Real ClickHouse and Cassandra (Docker Compose).** The `FINAL`, `uniqExact` and `{seq:UInt64}` parameter SQL has never run against real ClickHouse, and neither has the multi-version view. The online-store loader (ADR 0019) isn't built. Its tests would check that a replayed older snapshot never overwrites a newer one (`USING TIMESTAMP`), and that the sampled read-back catches drift.
 2. **End-to-end CDC with real Debezium and Postgres.** This is the only way to check what actually arrives, as opposed to what our code does with it:
    - that `source.lsn` behaves as assumed across the snapshot-to-streaming handoff
    - TOAST placeholders with and without `REPLICA IDENTITY FULL`

@@ -1,6 +1,6 @@
 # 0008. Serve dashboards and derived app reads from ClickHouse, reconciled per snapshot
 
-- **Status:** Accepted
+- **Status:** Accepted; app-read part superseded by [0019](0019-online-serving-store-for-app-reads.md)
 - **Date:** 2026-09-26
 
 ## Context
