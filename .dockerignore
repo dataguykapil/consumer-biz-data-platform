@@ -1,0 +1,8 @@
+.git
+.venv
+.tools
+spark-warehouse
+metastore_db
+*.pdf
+*.md
+!README.md

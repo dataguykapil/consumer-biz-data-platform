@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local toolchain and Spark/Iceberg test artifacts
+.tools/
+spark-warehouse/
+metastore_db/
+derby.log
+.ivy2/
