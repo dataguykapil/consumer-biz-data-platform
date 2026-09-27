@@ -1,6 +1,6 @@
 # Consumer Data Platform — Lakehouse Design
 
-**Scope:** lending, insurance and recharge on one lakehouse. **Stack:** Iceberg + Polaris (REST catalog), Debezium + Kafka, Spark 4.1 (PySpark), ClickHouse. **Code:** `src/cdp/` (371 executable lines), 33 tests (`make test`), [`test-plan.md`](test-plan.md).
+**Scope:** lending, insurance and recharge on one lakehouse. **Stack:** Iceberg + Polaris (REST catalog), Debezium + Kafka, Spark 4.1 (PySpark), ClickHouse (BI), Cassandra (app reads). **Code:** `src/cdp/` (371 executable lines), 33 tests (`make test`), [`test-plan.md`](test-plan.md).
 
 ## 1. Summary
 
@@ -18,7 +18,7 @@ Most of this is a standard lakehouse. The effort goes into three places where a 
 - **A single processing engine for batch and streaming,** so there is only one codebase that produces silver.
 - **No vendor lock-in.**
 
-**The price is operations:** we run the catalog, Kafka, Spark on Kubernetes and ClickHouse ourselves (§8).
+**The price is operations:** we run the catalog, Kafka, Spark on Kubernetes, ClickHouse and Cassandra ourselves (§8).
 
 ## 2. Assumptions
 
@@ -65,10 +65,11 @@ flowchart TB
         RL["ops.reconciliation_log"]
     end
 
-    PLAT["Platform services: Polaris REST catalog · Airflow · OpenLineage → Marquez · compaction &amp; snapshot expiry"]
+    PLAT["Platform services: Polaris REST catalog · Airflow · OpenLineage → OpenMetadata (catalog, lineage) · compaction &amp; snapshot expiry"]
 
     subgraph SRV["Serving"]
-        CH[("ClickHouse · ReplacingMergeTree by snapshot")]
+        CH[("ClickHouse · BI · ReplacingMergeTree by snapshot")]
+        OS[("Online store · Cassandra by customer_id")]
         SQ["Spark SQL endpoint · ad hoc + audit (all layers, incl. reconciliation log)"]
         FT["Feature tables · Iceberg, point-in-time"]
     end
@@ -98,8 +99,9 @@ flowchart TB
     GM -- "published snapshot, then reconcile" --> CH
     GM --> SQ
     GM --> FT
+    GM -- "reconciled load" --> OS
 
-    CH -- "derived reads" --> APP
+    OS -- "derived reads via read API" --> APP
     CH --> FIN
     SQ --> FIN
     SQ --> AUD
@@ -112,8 +114,8 @@ flowchart TB
 | Layer | Holds | Write pattern |
 |---|---|---|
 | **Landing** | Files, API responses and sheet exports exactly as received, addressed by sha256 | Write-once |
-| **Bronze** | Every record in the common envelope (§4). CDC keeps *every* change, not just the latest state. This is the replay point, since Kafka keeps only 7 days and partners can't resend old data. | Append-only |
-| **Silver** | *Current-state entities* from CDC (§7.1) and *bitemporal facts* from files and events (§7.2), with PII tokenised | `MERGE`, merge-on-read |
+| **Bronze** | Every record in the common envelope (§4), PII already tokenised (§8). CDC keeps *every* change, not just the latest state. This is the replay point, since Kafka keeps only 7 days and partners can't resend old data. | Append-only |
+| **Silver** | *Current-state entities* from CDC (§7.1) and *bitemporal facts* from files and events (§7.2) | `MERGE`, merge-on-read |
 | **Gold** | Domain marts, finance ledgers and feature tables. Each metric is defined once, in code. | Write-audit-publish (§7.3) |
 
 | Decision | Chosen | Rejected, and why | What it costs |
@@ -121,8 +123,9 @@ flowchart TB
 | Table format | **Iceberg** | Delta (narrower multi-engine support, and branches are what the gate needs); Hudi (heavy to operate) | We own compaction, snapshot expiry and delete-file cleanup |
 | Catalog | **Polaris** (REST) | Hive Metastore (no REST spec or credential vending); Glue and Unity (lock-in) | Another service to run. It is a single point of failure for *commits*. |
 | Processing | **Spark**, batch and micro-batch | Flink-only (weaker Iceberg upsert and maintenance tooling, and a second codebase for files); lambda (two pipelines that eventually disagree) | Lake freshness bottoms out at 1–5 minutes. Flink stays outside the lake. |
-| BI serving | **ClickHouse**, loaded from published gold | Querying Iceberg directly for dashboards (rescans Parquet on every refresh) | A second copy of the numbers, reconciled after every load (§7.3) |
+| BI serving | **ClickHouse** (BI only), loaded from published gold | Querying Iceberg directly for dashboards (rescans Parquet on every refresh) | A second copy of the numbers, reconciled after every load (§7.3) |
 | Ad hoc and audit | **Spark SQL** (notebooks, plus a Spark Connect endpoint on its own cluster) | Trino (a whole engine for low-concurrency queries, with no federation need); ClickHouse on Iceberg (time travel unverified) | Seconds-to-minutes latency. In return, the engine that writes the tables also reads them for audit. |
+| App derived reads | **Online store: Cassandra** keyed by customer, loaded from published gold ([ADR 0019](adr/0019-online-serving-store-for-app-reads.md)) | ClickHouse (an analytics engine under app traffic, sharing load with BI); a separate ClickHouse cluster | Another datastore to run. Loads are reconciled, but rows appear as written, not in one atomic flip. |
 | Money-authoritative app reads | **The owning OLTP service** | Apps reading the lake or ClickHouse | Two read paths for apps. The lake never becomes a system of record. |
 | Orchestration | **Airflow** | Dagster (a fine fit; not worth arguing over) | DAG-level freshness, made up for with table watermarks (§5) |
 
@@ -133,10 +136,12 @@ flowchart TB
   - *Streaming:* a 1-minute trigger merges ≈600k events per batch at peak, fewer after per-key reduction (§7.1).
 - **50M customers.**
   - *Silver entity tables* are bucketed by key: `bucket(64, customer_id)` for customers (≈50M rows, ~10–20 GB) and `bucket(32, loan_id)` for loans. Merge-on-read means a batch that touches customers spread across every bucket writes small delete files rather than rewriting data files.
-  - *ClickHouse app tables* are sorted by `customer_id` first, so a customer's history or summary is a primary-index lookup of one granule, not a scan.
+  - *Online store* rows are partitioned by `(customer_id, month)` in Cassandra, so a customer's history is one partition read, newest first. ClickHouse, used for BI only, is partitioned by month.
   - *PII tokens* are a deterministic keyed HMAC, so tables join on tokens without touching the vault.
 - **500M file rows/day.** File facts are partitioned by `business_date`. Each file load prunes to one (partner, date) partition, which also limits commit conflicts to that delivery (§7.2).
 - **5 years.** Bronze plus silver is ≈200 TB, which forces snapshot expiry (7 days) and is the reason history lives in the data (§7.2).
+
+The storage-level choices are recorded as ADRs: [compression](adr/0020-compression.md) (zstd Parquet and Kafka, column codecs in ClickHouse), [partitioning and sharding](adr/0021-partitioning-clustering-sharding.md) for every store, and [archival tiers](adr/0022-archival-and-retention-tiers.md). The archival ADR explains why Iceberg files never go to restore-required storage classes or lifecycle expiration.
 
 ## 4. Getting data in
 
@@ -171,14 +176,14 @@ How each source misbehaves, and what we do about it, is in **Appendix A**. The t
 - **Contracts.** Each table has an owner and a contract (grain, keys, column semantics). Each metric is defined once, in gold code.
 - **Lineage.** OpenLineage gives table-level lineage, and `_source_position` gives row-level lineage.
 
-Ownership, classification, masking and access audit are detailed in **Appendix C**.
+Ownership, classification, masking and access audit are detailed in **Appendix C**. The quality layers and tooling are in [ADR 0023](adr/0023-data-quality-framework.md), and the catalog and lineage choice (OpenMetadata fed by OpenLineage) is in [ADR 0024](adr/0024-metadata-catalog-and-lineage.md).
 
 ## 6. Serving
 
 | Consumer | Gets | Freshness |
 |---|---|---|
 | **Finance / analysts** | ClickHouse marts, and Spark SQL for ad hoc work on any layer. Month-end figures come from an Iceberg tag `close-YYYY-MM`, which is never expired, so a reported number can be reproduced years later. | Minutes; daily for reconciled finance |
-| **Applications** | *Derived* reads (history, summaries, eligibility) from ClickHouse through an internal read API that returns the watermark. *Money-authoritative* reads come from the owning service. | Minutes / live |
+| **Applications** | *Derived* reads (history, summaries, eligibility, masked display values) from the **online store** (Cassandra) through an internal read API that returns the watermark. ClickHouse is not in the app path. *Money-authoritative* reads come from the owning service. | Minutes / live |
 | **Data scientists** | Gold feature tables built with point-in-time joins on silver's bitemporal columns | Daily |
 | **Auditors** | Read-only Spark SQL over gold, month-end tags, bitemporal silver, `ops.reconciliation_log` and raw files. A number traces from snapshot to reconciliation record, to silver as known then, to bronze position, to the WAL position or file. | Any point in 5 years |
 
@@ -253,6 +258,7 @@ Each of the three parts below has code in `src/cdp/`. For each, every mechanism 
 2. **Audit the branch.** Compare its totals exactly and null-safely with the source totals and with silver as known at the run's watermarks. A date on only one side is a mismatch, and an overflow fails the run.
 3. **Publish or keep main.** On a pass, `fast_forward` main to the branch in one atomic step. If main moved since the branch was cut, Iceberg refuses, which catches a second writer. On a failure, main is untouched, the branch is kept for inspection, and the verdict is logged to `ops.reconciliation_log`.
 4. **ClickHouse.** Rows carry the snapshot's commit time as `_snapshot_seq`, which is **part of the `ReplacingMergeTree` sort key**, so a failed load can't replace published rows. The same totals are then compared in ClickHouse. Only on a match is the version recorded in `cdp_meta.published_versions`, which serving views filter on.
+5. **Online store.** It loads only published snapshots. Writes use the snapshot commit time as the Cassandra write timestamp, so an older snapshot can't overwrite a newer one. The loader's written counts, plus a nightly sampled read-back, are compared with Iceberg ([ADR 0019](adr/0019-online-serving-store-for-app-reads.md)).
 
 **Costs and limits.**
 - **Latency.** Publishing waits for the audit (minutes), and a late control file blocks its tables.
@@ -287,9 +293,9 @@ Failure-by-failure recovery is in **Appendix B**. In short, bronze is always the
 - **People:** the real price of the open stack is a small platform team.
 
 **Security.**
-- **Tokenisation.** PII is tokenised into silver, and the vault is restricted.
+- **Tokenisation.** PII is tokenised **before the bronze write**, so clear PII exists only in Kafka (7 days) and briefly in the landing zone. Originals sit in the vault, encrypted per customer ([ADR 0025](adr/0025-pii-storage-and-anonymisation.md)).
 - **Access.** Polaris RBAC is per domain and layer; Spark SQL enforces it, and ClickHouse roles mirror it.
-- **Erasure.** Deleting a vault entry crypto-shreds the data without rewriting bronze. How that fits lenders' and insurers' retention obligations needs legal input.
+- **Erasure.** Deleting a customer's data key crypto-shreds their values everywhere, without rewriting immutable layers, because bronze only ever held tokens. How that fits lenders' and insurers' retention obligations needs legal input.
 
 ## 9. Honesty
 
@@ -385,7 +391,7 @@ Pipeline logs are structured JSON tagged with the run id, and OpenLineage events
 | Volume drift | Rows in vs. out per batch and per day | Zero rows, or a change beyond 3σ of the last 28 days | Ticket, domain owner |
 | Write contention | Iceberg commit conflicts and retries per table | Retries exhausted (P2); a rising trend (ticket) | Platform |
 | Table health | Small files, delete files and snapshots per partition | Above threshold: run targeted compaction, open a ticket | Platform |
-| Serving | App read API p99 latency (ClickHouse) | > 200 ms for 5 min | P2, platform |
+| Serving | App read API p99 latency (online store) | > 50 ms for 5 min | P2, platform |
 | Catalog | Polaris availability, commit latency | Down or erroring | P1, platform |
 | Cost | Compute and storage per pipeline per day | +30% week over week | Ticket, owner |
 

@@ -1,6 +1,6 @@
 # 0018. Adopt a baseline for observability and governance
 
-- **Status:** Accepted
+- **Status:** Accepted; PII handling refined by [0025](0025-pii-storage-and-anonymisation.md), catalog and lineage tooling by [0024](0024-metadata-catalog-and-lineage.md)
 - **Date:** 2026-09-27
 
 ## Context

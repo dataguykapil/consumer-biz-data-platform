@@ -27,7 +27,7 @@ A lakehouse design for three consumer businesses (**lending, insurance and recha
 
 ## Architecture
 
-![Architecture: sources flow through ingestion into bronze, silver and gold Iceberg layers, then to ClickHouse and Spark SQL for consumers](docs/architecture.png)
+![Architecture: sources flow through ingestion into bronze, silver and gold Iceberg layers, then to ClickHouse, an online store and Spark SQL for consumers](docs/architecture.png)
 
 *The source is the Mermaid diagram in [`docs/design.md`](docs/design.md#3-architecture). Regenerate the PNG with `make diagram`.*
 
@@ -35,7 +35,7 @@ A lakehouse design for three consumer businesses (**lending, insurance and recha
 - **Bronze:** everything lands in an append-only layer where every row carries the same tracking columns.
 - **Silver:** holds current-state tables built from CDC, and bitemporal fact tables built from files.
 - **Gold:** published only after its control totals match the source **to the paise**.
-- **Serving:** ClickHouse for dashboards and derived app reads, and Spark SQL for ad hoc and audit queries. Money that a customer sees is always read from the owning service, never from the lake.
+- **Serving:** ClickHouse for dashboards (BI only), an online store (Cassandra, keyed by customer) for derived app reads, and Spark SQL for ad hoc and audit queries. Money that a customer sees is always read from the owning service, never from the lake.
 
 The full design, with trade-offs, sizing, operations and an honesty section, is in [`docs/design.md`](docs/design.md). The individual decisions are in the [ADRs](docs/adr/README.md).
 
@@ -56,7 +56,8 @@ The full design, with trade-offs, sizing, operations and an honesty section, is 
 | Processing | Apache Spark / PySpark | 4.1.3 |
 | Runtime | Python / JDK (Temurin) | 3.14 (3.12 also tested) / 21 LTS |
 | Ingestion | Debezium, Kafka, Schema Registry | — (design) |
-| Serving | ClickHouse; Spark SQL for ad hoc and audit | — (design) |
+| Serving | ClickHouse (BI); Cassandra online store (app reads); Spark SQL (ad hoc and audit) | — (design) |
+| Catalog, lineage, quality | OpenMetadata, OpenLineage, Soda Core + in-house money checks | — (design) |
 | Orchestration | Airflow | — (design) |
 
 Versions are the newest ones that work together; [ADR 0016](docs/adr/0016-toolchain-versions.md) explains why. JDK 25 is outside Spark 4.1's supported set, and PySpark 4.2 has no Iceberg runtime yet. Components marked *design* are specified in the design document but not deployed by this repository.
@@ -165,7 +166,7 @@ To prove the tests catch what they claim, each mechanism was also **broken on pu
 |---|---|
 | [`docs/design.md`](docs/design.md) | Architecture, ingestion, trust, serving, operations, the three hard parts, and the honesty section, plus appendices on source handling, failure recovery, and observability and governance |
 | [`docs/test-plan.md`](docs/test-plan.md) | Each test, what it asserts, and which broken design it would catch |
-| [`docs/adr/`](docs/adr/README.md) | 18 architecture decision records |
+| [`docs/adr/`](docs/adr/README.md) | 25 architecture decision records: stack, the three guarantees, serving, compression, partitioning and sharding, archival, data quality, catalog and lineage, PII |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Branching, commits, hooks, PR checklist, ADR process |
 
 ## Known limitations

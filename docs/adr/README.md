@@ -11,7 +11,7 @@ Each ADR records one decision: its context, what was decided, its consequences, 
 | 0005 | [Land everything in an append-only bronze layer under one ingestion envelope](0005-layers-and-ingestion-envelope.md) | Accepted | 2026-09-26 |
 | 0006 | [Capture Postgres changes with Debezium into Kafka](0006-debezium-kafka-cdc.md) | Accepted | 2026-09-26 |
 | 0007 | [Use Spark as the single processing engine; keep Flink outside the lake](0007-spark-single-processing-engine.md) | Accepted | 2026-09-26 |
-| 0008 | [Serve dashboards and derived app reads from ClickHouse, reconciled per snapshot](0008-clickhouse-serving.md) | Accepted | 2026-09-26 |
+| 0008 | [Serve dashboards and derived app reads from ClickHouse, reconciled per snapshot](0008-clickhouse-serving.md) | Accepted; app reads superseded by 0019 | 2026-09-26 |
 | 0009 | [Use Spark SQL, not Trino, for ad hoc and audit queries](0009-spark-sql-not-trino.md) | Accepted | 2026-09-27 |
 | 0010 | [Serve money-authoritative reads from the owning OLTP service, never the lake](0010-money-reads-from-oltp.md) | Accepted | 2026-09-26 |
 | 0011 | [Represent money as signed integer paise, with Spark ANSI mode on](0011-signed-integer-paise.md) | Accepted | 2026-09-26 |
@@ -21,4 +21,11 @@ Each ADR records one decision: its context, what was decided, its consequences, 
 | 0015 | [Implement in PySpark and test against a real local Iceberg catalog](0015-pyspark-real-iceberg-tests.md) | Accepted | 2026-09-26 |
 | 0016 | [Pin the toolchain to the newest mutually compatible stable versions](0016-toolchain-versions.md) | Accepted | 2026-09-27 |
 | 0017 | [Use Airflow for batch orchestration](0017-airflow-orchestration.md) | Accepted | 2026-09-26 |
-| 0018 | [Adopt a baseline for observability and governance](0018-observability-governance-baseline.md) | Accepted | 2026-09-27 |
+| 0018 | [Adopt a baseline for observability and governance](0018-observability-governance-baseline.md) | Accepted; refined by 0024, 0025 | 2026-09-27 |
+| 0019 | [Serve app derived reads from an online serving store; keep ClickHouse for BI only](0019-online-serving-store-for-app-reads.md) | Accepted (supersedes part of 0008) | 2026-09-27 |
+| 0020 | [Compress with zstd in Parquet and Kafka, and choose column codecs in the serving stores](0020-compression.md) | Accepted | 2026-09-27 |
+| 0021 | [Partition by time and bucket by key; shard only the serving stores](0021-partitioning-clustering-sharding.md) | Accepted | 2026-09-27 |
+| 0022 | [Tier storage by age without breaking Iceberg, and delete through Iceberg at the end of retention](0022-archival-and-retention-tiers.md) | Accepted | 2026-09-27 |
+| 0023 | [Layer data-quality checks by where they run and what they block; build money checks in-house and adopt Soda Core for rules](0023-data-quality-framework.md) | Accepted | 2026-09-27 |
+| 0024 | [Use OpenMetadata as the business catalog and lineage store, fed by OpenLineage and the contracts](0024-metadata-catalog-and-lineage.md) | Accepted | 2026-09-27 |
+| 0025 | [Tokenise PII at the bronze boundary, encrypt originals per subject, and publish de-identified data for analytics](0025-pii-storage-and-anonymisation.md) | Accepted (refines 0018) | 2026-09-27 |
