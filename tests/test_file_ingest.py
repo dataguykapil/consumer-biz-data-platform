@@ -63,8 +63,12 @@ def deliver(tmp_path):
         path, trailer_path = tmp_path / f"acme_{n}.csv", tmp_path / f"acme_{n}.trailer.json"
         body = [header] + [f"{t},{day},{kind},{amount}" for t, kind, amount in rows]
         path.write_text("\n".join(body) + "\n")
-        declared = {"row_count": len(rows), "total_paise": sum(int(a) for _, _, a in rows if str(a).lstrip("-").isdigit()),
-                    "distinct_keys": len({t for t, _, _ in rows}), "generated_at": generated_at.isoformat()}
+        declared = {
+            "row_count": len(rows),
+            "total_paise": sum(int(a) for _, _, a in rows if str(a).lstrip("-").isdigit()),
+            "distinct_keys": len({t for t, _, _ in rows}),
+            "generated_at": generated_at.isoformat(),
+        }
         trailer_path.write_text(json.dumps({**declared, **trailer}))
         return Delivery("acme", DAY, str(path), str(trailer_path))
 
@@ -85,7 +89,10 @@ def test_same_file_twice_publishes_once(spark, contract, deliver):
     # Would fail if dedup lived only in the manifest: here the manifest has lost its state.
     file = deliver(V1, generated_at=T0)
     assert ingest_file(spark, file, contract, FakeManifest(), "w1", recorded_at=T0) == Outcome.LOADED
-    assert ingest_file(spark, file, contract, FakeManifest(), "w1", recorded_at=T0 + timedelta(hours=1)) == Outcome.ALREADY_LOADED
+    assert (
+        ingest_file(spark, file, contract, FakeManifest(), "w1", recorded_at=T0 + timedelta(hours=1))
+        == Outcome.ALREADY_LOADED
+    )
     assert current(spark, contract) == [("t1", 10_000), ("t2", 25_000), ("t3", -5_000)]
     assert spark.table(contract.table).count() == 3
 
@@ -99,7 +106,10 @@ def test_crash_after_commit_then_retry_does_not_duplicate(spark, contract, deliv
         ingest_file(spark, file, contract, manifest, "w1", recorded_at=T0)
     assert manifest.states[sha256_of(file.path)] == "CLAIMED"
 
-    assert ingest_file(spark, file, contract, manifest, "w2", recorded_at=T0 + timedelta(hours=1)) == Outcome.ALREADY_LOADED
+    assert (
+        ingest_file(spark, file, contract, manifest, "w2", recorded_at=T0 + timedelta(hours=1))
+        == Outcome.ALREADY_LOADED
+    )
     spark.catalog.refreshTable(contract.table)
     assert spark.table(contract.table).count() == 3
     commits_with_sha = spark.sql(f"SELECT summary FROM {contract.table}.snapshots").collect()
@@ -143,13 +153,16 @@ def test_two_versions_racing_leave_only_the_newer_current(spark, contract, deliv
     assert current(spark, contract) == [("t1", 10_000), ("t2", 20_000)]
 
 
-@pytest.mark.parametrize("bad, reason", [
-    (dict(rows=[("t1", "PAYMENT", "12.50")]), "amount_paise are not BIGINT"),
-    (dict(rows=V1, total_paise=999), "!= trailer"),
-    (dict(rows=V1 + [("t1", "PAYMENT", 1)]), "duplicate keys"),
-    (dict(rows=V1, day=date(2026, 8, 31)), "not dated 2026-09-01"),
-    (dict(rows=V1, header="txn_id,business_date,amount_paise,txn_type"), "header"),
-])
+@pytest.mark.parametrize(
+    "bad, reason",
+    [
+        (dict(rows=[("t1", "PAYMENT", "12.50")]), "amount_paise are not BIGINT"),
+        (dict(rows=V1, total_paise=999), "!= trailer"),
+        (dict(rows=V1 + [("t1", "PAYMENT", 1)]), "duplicate keys"),
+        (dict(rows=V1, day=date(2026, 8, 31)), "not dated 2026-09-01"),
+        (dict(rows=V1, header="txn_id,business_date,amount_paise,txn_type"), "header"),
+    ],
+)
 def test_invalid_file_is_quarantined_and_publishes_nothing(spark, contract, deliver, bad, reason):
     # Would fail if validation ran row by row and loaded the good rows.
     file = deliver(generated_at=T0, **bad)
@@ -177,7 +190,9 @@ def test_restatement_replaces_current_and_keeps_what_was_known(spark, contract, 
 def test_stale_version_never_becomes_current(spark, contract, deliver, order):
     # Would fail if "newest to arrive wins": a resent or late v1 would overwrite v2.
     files = {"v1": deliver(V1, generated_at=T0), "v2": deliver(V2, generated_at=T0 + timedelta(hours=4))}
-    outcomes = [ingest_file(spark, files[name], contract, FakeManifest(), "w1", recorded_at=T0 + timedelta(hours=i))
-                for i, name in enumerate(order, start=1)]
+    outcomes = [
+        ingest_file(spark, files[name], contract, FakeManifest(), "w1", recorded_at=T0 + timedelta(hours=i))
+        for i, name in enumerate(order, start=1)
+    ]
     assert outcomes[-1] == Outcome.SUPERSEDED
     assert current(spark, contract) == [("t1", 10_000), ("t2", 20_000)]

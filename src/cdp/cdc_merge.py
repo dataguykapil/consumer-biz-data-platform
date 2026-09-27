@@ -120,7 +120,7 @@ def merge_sql(table: CdcTable, source_view: str) -> str:
         ON {on}
         WHEN MATCHED AND s._lsn > t._lsn THEN UPDATE SET {", ".join(updates)}
         WHEN NOT MATCHED THEN INSERT ({", ".join(insert_cols)}) VALUES ({", ".join(insert_vals)})
-    """
+    """  # nosec B608: identifiers come from trusted config/validated ids, never row data
 
 
 def apply_cdc_batch(events: DataFrame, table: CdcTable) -> int | None:

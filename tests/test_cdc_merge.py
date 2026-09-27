@@ -155,9 +155,7 @@ def test_toast_placeholder_keeps_previous_value(spark, loans):
 def test_watermark_is_committed_with_the_data(spark, loans):
     # Would fail if the watermark were written separately and could disagree with the data.
     assert apply(spark, loans, APPROVED, DISBURSED) == 103
-    latest = spark.sql(
-        f"SELECT summary FROM {loans.name}.snapshots ORDER BY committed_at DESC LIMIT 1"
-    ).first()
+    latest = spark.sql(f"SELECT summary FROM {loans.name}.snapshots ORDER BY committed_at DESC LIMIT 1").first()
     assert latest.summary[WATERMARK_PROPERTY] == "103"
     assert spark.conf.get("spark.sql.iceberg.snapshot-property." + WATERMARK_PROPERTY, None) is None
 

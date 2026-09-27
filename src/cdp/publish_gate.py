@@ -73,15 +73,23 @@ def compare(actual: DataFrame, expected: DataFrame, side: str) -> list[str]:
     return [
         f"{side}: {r.source_system} {r.business_date} gold={r.a_rows, r.a_paise, r.a_keys} "
         f"{side}={r.e_rows, r.e_paise, r.e_keys}"
-        for r in joined.where(~same).select(
-            *GROUPING, *(F.col(f"{s}.{m}").alias(f"{s}_{m}") for s in "ae" for m in ("rows", "paise", "keys"))
-        ).limit(_MAX_REPORTED).collect()
+        for r in joined.where(~same)
+        .select(*GROUPING, *(F.col(f"{s}.{m}").alias(f"{s}_{m}") for s in "ae" for m in ("rows", "paise", "keys")))
+        .limit(_MAX_REPORTED)
+        .collect()
     ]
 
 
-def publish_with_gate(spark: SparkSession, gold: GoldTable, rows: DataFrame, business_dates: list[date],
-                      expected: dict[str, DataFrame], run_id: str, log_table: str,
-                      watermarks: dict[str, str] | None = None) -> GateResult:
+def publish_with_gate(
+    spark: SparkSession,
+    gold: GoldTable,
+    rows: DataFrame,
+    business_dates: list[date],
+    expected: dict[str, DataFrame],
+    run_id: str,
+    log_table: str,
+    watermarks: dict[str, str] | None = None,
+) -> GateResult:
     """Write ``rows`` for ``business_dates`` on an audit branch and publish only if they reconcile.
 
     ``expected`` maps a side name ("source", "silver") to totals in the
@@ -105,13 +113,12 @@ def publish_with_gate(spark: SparkSession, gold: GoldTable, rows: DataFrame, bus
     finally:
         for key in properties:
             spark.conf.unset(_SNAPSHOT_PROPERTY_CONF + key)
-    snapshot_id = spark.sql(f"SELECT snapshot_id FROM {gold.name}.refs WHERE name = '{branch}'").first()[0]
+    snapshot_id = spark.sql(f"SELECT snapshot_id FROM {gold.name}.refs WHERE name = '{branch}'").first()[0]  # nosec B608: identifiers come from trusted config/validated ids, never row data
 
     audited = spark.read.option("versionAsOf", snapshot_id).table(gold.name).where(in_window)
     actual = control_totals(audited, gold).cache()
     try:
-        mismatches = [m for side, totals in expected.items()
-                      for m in compare(actual, totals.where(in_window), side)]
+        mismatches = [m for side, totals in expected.items() for m in compare(actual, totals.where(in_window), side)]
     finally:
         actual.unpersist()
 
@@ -125,11 +132,28 @@ def publish_with_gate(spark: SparkSession, gold: GoldTable, rows: DataFrame, bus
     return result
 
 
-def _log(spark: SparkSession, log_table: str, gold: GoldTable, result: GateResult,
-         business_dates: list[date], properties: dict[str, str]) -> None:
+def _log(
+    spark: SparkSession,
+    log_table: str,
+    gold: GoldTable,
+    result: GateResult,
+    business_dates: list[date],
+    properties: dict[str, str],
+) -> None:
     spark.createDataFrame(
-        [(result.run_id, gold.name, result.branch, result.snapshot_id, result.published,
-          business_dates, result.mismatches, properties, datetime.now(timezone.utc))],
+        [
+            (
+                result.run_id,
+                gold.name,
+                result.branch,
+                result.snapshot_id,
+                result.published,
+                business_dates,
+                result.mismatches,
+                properties,
+                datetime.now(timezone.utc),
+            )
+        ],
         "run_id STRING, table_name STRING, branch STRING, snapshot_id BIGINT, published BOOLEAN, "
         "business_dates ARRAY<DATE>, mismatches ARRAY<STRING>, properties MAP<STRING, STRING>, checked_at TIMESTAMP",
     ).writeTo(log_table).append()
@@ -149,8 +173,16 @@ def _log(spark: SparkSession, log_table: str, gold: GoldTable, result: GateResul
 #       SELECT business_date, max(snapshot_seq) FROM cdp_meta.published_versions
 #       WHERE table_name = '<t>' GROUP BY business_date);
 
-def sync_to_clickhouse(spark: SparkSession, gold: GoldTable, snapshot_id: int, business_dates: list[date],
-                       ch, ch_table: str, batch_rows: int = 100_000) -> list[str]:
+
+def sync_to_clickhouse(
+    spark: SparkSession,
+    gold: GoldTable,
+    snapshot_id: int,
+    business_dates: list[date],
+    ch,
+    ch_table: str,
+    batch_rows: int = 100_000,
+) -> list[str]:
     """Load a published snapshot's dates into ClickHouse, reconcile, then make them visible.
 
     ``ch`` is a ``clickhouse_connect`` client. Re-running is safe: the same
@@ -158,10 +190,14 @@ def sync_to_clickhouse(spark: SparkSession, gold: GoldTable, snapshot_id: int, b
     reading the snapshot's Parquet via ``s3()``; the reconciliation is unchanged.
     """
     committed_at = spark.sql(
-        f"SELECT committed_at FROM {gold.name}.snapshots WHERE snapshot_id = {snapshot_id}").first()[0]
+        f"SELECT committed_at FROM {gold.name}.snapshots WHERE snapshot_id = {snapshot_id}"  # nosec B608: identifiers come from trusted config/validated ids, never row data
+    ).first()[0]
     seq = int(committed_at.timestamp() * 1000)
-    rows = (spark.read.option("versionAsOf", snapshot_id).table(gold.name)
-            .where(F.col("business_date").isin(business_dates)))
+    rows = (
+        spark.read.option("versionAsOf", snapshot_id)
+        .table(gold.name)
+        .where(F.col("business_date").isin(business_dates))
+    )
     columns = [*rows.columns, "_snapshot_seq"]
     batch = []
     for row in rows.toLocalIterator():
@@ -174,15 +210,19 @@ def sync_to_clickhouse(spark: SparkSession, gold: GoldTable, snapshot_id: int, b
 
     keys = ", ".join(gold.key_columns)
     served = ch.query(
-        f"SELECT source_system, business_date, count(), sum({gold.amount_column}), uniqExact({keys}) "
+        f"SELECT source_system, business_date, count(), sum({gold.amount_column}), uniqExact({keys}) "  # nosec B608: identifiers come from trusted config/validated ids, never row data
         f"FROM {ch_table} FINAL WHERE _snapshot_seq = {{seq:UInt64}} "
         f"AND business_date IN {{dates:Array(Date)}} GROUP BY source_system, business_date",
         parameters={"seq": seq, "dates": business_dates},
     ).result_rows
     ch_totals = spark.createDataFrame(
-        served, "source_system STRING, business_date DATE, rows BIGINT, paise BIGINT, keys BIGINT")
+        served, "source_system STRING, business_date DATE, rows BIGINT, paise BIGINT, keys BIGINT"
+    )
     mismatches = compare(control_totals(rows, gold), ch_totals, "clickhouse")
     if not mismatches:
-        ch.insert("cdp_meta.published_versions", [[ch_table, d, seq] for d in business_dates],
-                  column_names=["table_name", "business_date", "snapshot_seq"])
+        ch.insert(
+            "cdp_meta.published_versions",
+            [[ch_table, d, seq] for d in business_dates],
+            column_names=["table_name", "business_date", "snapshot_seq"],
+        )
     return mismatches

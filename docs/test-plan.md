@@ -2,7 +2,7 @@
 
 Each test targets one guarantee from the design (§7) and names the **wrong design it would catch**. A test that would still pass against a broken design doesn't count. So each mechanism was also broken on purpose to confirm that at least one test fails. That's in the "Proof the tests bite" tables.
 
-**How to run:** `make test` (local JDK 17 + PySpark 4.1.3 + Iceberg 1.11.0), or `make docker-test`. The tests use a real Iceberg table on local disk, not mocks: every guarantee depends on Iceberg's actual `MERGE`, snapshot and commit behaviour. The suite has 33 tests and takes about 30 seconds.
+**How to run:** `make test` (Python 3.14, JDK 21, PySpark 4.1.3, Iceberg 1.11.0), or `make docker-test`. The tests use a real Iceberg table on local disk, not mocks: every guarantee depends on Iceberg's actual `MERGE`, snapshot and commit behaviour. The suite has 33 tests and takes about 30 seconds.
 
 ---
 
