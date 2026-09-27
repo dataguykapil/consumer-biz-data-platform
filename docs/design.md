@@ -35,81 +35,144 @@ Most of this is a standard lakehouse. The effort goes into three places where a 
 
 ## 3. Architecture
 
-*Rendered copy: [`architecture.png`](architecture.png) (regenerate with `make diagram`).*
+Two views: **containers** (what runs and who talks to whom) and **data flow** (the path a record takes, and where each guarantee applies).
+
+### 3.1 Containers
+
+*Rendered copy: [`architecture-containers.png`](architecture-containers.png). Regenerate both diagrams with `make diagram`.*
 
 ```mermaid
-%%{init: {"flowchart": {"rankSpacing": 40, "nodeSpacing": 30, "wrappingWidth": 280}}}%%
+%%{init: {"flowchart": {"rankSpacing": 50, "nodeSpacing": 30, "wrappingWidth": 250}}}%%
 flowchart TB
-    subgraph SRC["Sources"]
-        PG[("Postgres: lending · insurance · recharge")]
-        EV["App event streams"]
-        PF["Partner / vendor daily files"]
-        API["Third-party APIs"]
-        SH["Ops spreadsheets"]
+    subgraph EXT["External systems"]
+        PG[("Service databases · Postgres<br/>lending · insurance · recharge")]
+        PARTNER["Partners and vendors<br/>daily files over SFTP / S3"]
+        API3["Third-party APIs · Ops sheets"]
     end
 
-    subgraph ING["Ingestion"]
-        DBZ["Debezium (pgoutput)"]
-        K[["Kafka + Schema Registry · 7-day retention"]]
-        PULL["API / sheet pullers · raw responses kept"]
-        LZ["Landing zone · immutable raw files, sha256"]
+    subgraph CDP["Consumer Data Platform · Indian cloud regions only"]
+        subgraph ING["Ingestion"]
+            DBZ["Debezium on Kafka Connect<br/>reads the Postgres WAL"]
+            KAFKA[["Kafka + Schema Registry<br/>7-day retention"]]
+            PULL["API and sheet pullers"]
+            LZ[("Landing zone<br/>object storage bucket")]
+        end
+        subgraph PROC["Processing · Kubernetes"]
+            AIR["Airflow<br/>schedules batch jobs"]
+            JOBS["Spark 4.1 pipelines<br/>CDC merge · file loader · gold + publish gate · maintenance"]
+            TOK["Tokenisation service<br/>PII vault · keys in KMS / HSM"]
+        end
+        subgraph STORE["Lakehouse storage"]
+            S3[("Iceberg tables<br/>object storage")]
+            POL["Polaris<br/>Iceberg REST catalog"]
+        end
+        subgraph SERVE["Serving"]
+            CH[("ClickHouse · BI")]
+            SQ["Spark SQL endpoint<br/>ad hoc + audit"]
+            OS[("Online store · Cassandra")]
+            RAPI["Read API"]
+        end
+        subgraph GOV["Governance and operations"]
+            OM["OpenMetadata<br/>catalog · lineage · quality"]
+            MON["Prometheus · Grafana · Alertmanager"]
+        end
+        FLINK["Flink · fraud and live signals"]
     end
 
-    FLINK["Flink: fraud / live signals (outside the lake)"]
-
-    subgraph LH["Lakehouse — Iceberg on object storage"]
-        BR["Bronze · append-only, common envelope"]
-        SI["Silver · current state (CDC) + bitemporal facts (files)"]
-        GB["Gold — audit branch"]
-        GM["Gold — main · published only"]
-        RL["ops.reconciliation_log"]
-    end
-
-    PLAT["Platform services: Polaris REST catalog · Airflow · OpenLineage → OpenMetadata (catalog, lineage) · compaction &amp; snapshot expiry"]
-
-    subgraph SRV["Serving"]
-        CH[("ClickHouse · BI · ReplacingMergeTree by snapshot")]
-        OS[("Online store · Cassandra by customer_id")]
-        SQ["Spark SQL endpoint · ad hoc + audit (all layers, incl. reconciliation log)"]
-        FT["Feature tables · Iceberg, point-in-time"]
-    end
-
-    subgraph CON["Consumers"]
-        APP["Applications"]
-        FIN["Finance / analysts"]
+    subgraph USERS["Consumers"]
+        ANALYST["Finance and analysts"]
         AUD["Auditors"]
         DS["Data scientists"]
+        APPS["Applications"]
     end
 
-    PG --> DBZ --> K
-    EV --> K
-    PF --> LZ
-    API --> PULL
-    SH --> PULL
-    PULL --> LZ
-
-    K -- "Spark Structured Streaming" --> BR
-    LZ -- "contract check · quarantine on fail" --> BR
-    BR -- "§7.1 LSN-ordered MERGE · §7.2 restatement" --> SI
-    SI --> GB
-    GB -- "§7.3 reconcile → fast_forward" --> GM
-    GB -.-> RL
-    PLAT -.- LH
-
-    GM -- "published snapshot, then reconcile" --> CH
-    GM --> SQ
-    GM --> FT
-    GM -- "reconciled load" --> OS
-
-    OS -- "derived reads via read API" --> APP
-    CH --> FIN
-    SQ --> FIN
+    PG -- "logical replication" --> DBZ --> KAFKA
+    PARTNER -- "file drops" --> LZ
+    API3 --> PULL -- "raw responses" --> LZ
+    KAFKA -- "stream" --> JOBS
+    LZ -- "read files" --> JOBS
+    AIR -- "trigger" --> JOBS
+    JOBS -- "tokenise PII" --> TOK
+    JOBS -- "write Iceberg, commit via catalog" --> STORE
+    STORE -- "published gold" --> CH
+    STORE -- "published gold" --> OS
+    STORE -- "read via catalog" --> SQ
+    OS --> RAPI
+    CH -- "dashboards" --> ANALYST
+    SQ --> ANALYST
     SQ --> AUD
-    FT --> DS
-
-    K -.-> FLINK -.-> APP
-    PG -. "money-authoritative reads (not via the lake)" .-> APP
+    SQ --> DS
+    RAPI -- "derived reads" --> APPS
+    KAFKA --> FLINK
+    FLINK -- "live signals" --> APPS
+    PG -. "money-authoritative reads" .-> APPS
+    JOBS -. "OpenLineage events · metrics" .-> GOV
 ```
+
+Read it top to bottom: external systems feed ingestion; Spark pipelines tokenise PII and write Iceberg through the Polaris catalog; published gold feeds three serving paths. Apps never read the lake for money: that path is the dotted line from the service databases.
+
+### 3.2 Data flow
+
+*Rendered copy: [`architecture-dataflow.png`](architecture-dataflow.png).*
+
+```mermaid
+%%{init: {"flowchart": {"rankSpacing": 42, "nodeSpacing": 30, "wrappingWidth": 260}}}%%
+flowchart TB
+    subgraph SRC["Sources"]
+        CDC["Database changes (CDC)"]
+        EVT["App events"]
+        FILE["Partner files"]
+        APIS["API responses · sheets"]
+    end
+
+    K[["Kafka<br/>7 days · clear text, ACL-restricted"]]
+    LZ["Landing zone<br/>raw as received · sha256 · clear text ≤ 30 days"]
+    TOKN{{"Tokenise PII before bronze"}}
+    BR["Bronze · append-only · common envelope · tokens only"]
+    Q[("Quarantine<br/>failed files and rows")]
+
+    subgraph SIL["Silver"]
+        SCUR["Current state<br/>§7.1 LSN-ordered MERGE · tombstones"]
+        SFACT["Bitemporal file facts<br/>§7.2 one MERGE decides and writes"]
+        SEVT["Event facts<br/>deduplicated on event_id"]
+    end
+
+    GB["Gold · audit branch"]
+    GATE[["§7.3 Reconciliation gate<br/>rows · signed paise · distinct keys must equal source and silver"]]
+    GM["Gold · main · published"]
+    RL[("Reconciliation log")]
+
+    subgraph OUT["Serving copies"]
+        CH[("ClickHouse · BI")]
+        OS[("Online store · app reads")]
+        FT["Feature tables"]
+    end
+
+    CDC --> K
+    EVT --> K
+    FILE --> LZ
+    APIS --> LZ
+    K --> TOKN
+    LZ -- "contract check" --> TOKN
+    LZ -. "invalid file" .-> Q
+    TOKN --> BR
+    BR --> SCUR
+    BR --> SFACT
+    BR --> SEVT
+    BR -. "failed rule checks" .-> Q
+    SCUR --> GB
+    SFACT --> GB
+    SEVT --> GB
+    GB --> GATE
+    GATE -- "pass · fast_forward" --> GM
+    GATE -. "fail · main unchanged, branch kept" .-> RL
+    GATE -. "pass · verdict logged" .-> RL
+    GM -- "reconciled load" --> CH
+    GM -- "reconciled load" --> OS
+    GM --> FT
+```
+
+Clear-text PII exists only in Kafka and the landing zone; everything from bronze onwards holds tokens. Each silver merge and the gate are the three hard parts (§7). Nothing reaches a serving copy without passing the gate.
 
 | Layer | Holds | Write pattern |
 |---|---|---|
@@ -117,6 +180,8 @@ flowchart TB
 | **Bronze** | Every record in the common envelope (§4), PII already tokenised (§8). CDC keeps *every* change, not just the latest state. This is the replay point, since Kafka keeps only 7 days and partners can't resend old data. | Append-only |
 | **Silver** | *Current-state entities* from CDC (§7.1) and *bitemporal facts* from files and events (§7.2) | `MERGE`, merge-on-read |
 | **Gold** | Domain marts, finance ledgers and feature tables. Each metric is defined once, in code. | Write-audit-publish (§7.3) |
+
+### 3.3 Choices, what they cost, and what I rejected
 
 | Decision | Chosen | Rejected, and why | What it costs |
 |---|---|---|---|
@@ -129,7 +194,7 @@ flowchart TB
 | Money-authoritative app reads | **The owning OLTP service** | Apps reading the lake or ClickHouse | Two read paths for apps. The lake never becomes a system of record. |
 | Orchestration | **Airflow** | Dagster (a fine fit; not worth arguing over) | DAG-level freshness, made up for with table watermarks (§5) |
 
-### 3.1 Sizing to the stated scale
+### 3.4 Sizing to the stated scale
 
 - **10k events/s.** At ~1 KB per Avro event, peak ingress is about 10 MB/s.
   - *Kafka:* high-volume topics (recharge transactions, app events) get **24 partitions** each, and small CDC tables get 3–6. That leaves headroom per partition and matches Spark's read parallelism. Replication factor 3 at 7 days is ≈5 TB of Kafka storage.

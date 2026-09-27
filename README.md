@@ -27,9 +27,15 @@ A lakehouse design for three consumer businesses (**lending, insurance and recha
 
 ## Architecture
 
-![Architecture: sources flow through ingestion into bronze, silver and gold Iceberg layers, then to ClickHouse, an online store and Spark SQL for consumers](docs/architecture.png)
+Two views, both rendered from Mermaid sources in [`docs/design.md`](docs/design.md#3-architecture) (regenerate with `make diagram`):
 
-*The source is the Mermaid diagram in [`docs/design.md`](docs/design.md#3-architecture). Regenerate the PNG with `make diagram`.*
+**Containers: what runs, and who talks to whom**
+
+![Container diagram: external systems, ingestion, processing on Kubernetes, lakehouse storage with the Polaris catalog, serving (ClickHouse, Spark SQL, the Cassandra online store and read API), governance, and consumers](docs/architecture-containers.png)
+
+**Data flow: the path a record takes, and where each guarantee applies**
+
+![Data flow: sources through Kafka or the landing zone, PII tokenisation, bronze, three silver merges, the gold audit branch and reconciliation gate, then published gold to feature tables, the online store and ClickHouse](docs/architecture-dataflow.png)
 
 - **Ingestion:** every source enters through one door. Database changes go through Debezium and Kafka. Files, API responses and spreadsheets go through a landing zone that stores them exactly as received.
 - **Bronze:** everything lands in an append-only layer where every row carries the same tracking columns.
@@ -74,7 +80,7 @@ Versions are the newest ones that work together; [ADR 0016](docs/adr/0016-toolch
 ├── docs/
 │   ├── design.md           # the design document
 │   ├── test-plan.md        # what each test asserts and which broken design it catches
-│   ├── architecture.png    # rendered diagram
+│   ├── architecture-*.png  # rendered container and data flow diagrams
 │   └── adr/                # architecture decision records
 ├── .github/                # CI, CodeQL and Dependabot
 ├── .pre-commit-config.yaml # git hooks: commit stage + push stage
@@ -131,7 +137,7 @@ make check      # lint + security + the full test suite
 | `make check` | lint + security + test |
 | `make hooks` | Install the pre-commit and pre-push git hooks |
 | `make docker-test` | Build the image and run the suite inside it |
-| `make diagram` | Re-render `docs/architecture.png` from the Mermaid source (needs Node and Mermaid CLI in `.tools/`) |
+| `make diagram` | Re-render both architecture diagrams from the Mermaid sources in `docs/design.md` (needs Node and Mermaid CLI in `.tools/`) |
 
 ## Development workflow
 
