@@ -38,7 +38,7 @@ Two views, both rendered from Mermaid sources in [`docs/design.md`](docs/design.
 ![Data flow: sources through Kafka or the landing zone, PII tokenisation, bronze, three silver merges, the gold audit branch and reconciliation gate, then published gold to feature tables, the online store and ClickHouse](docs/architecture-dataflow.png)
 
 - **Ingestion:** every source enters through one door. Database changes go through Debezium and Kafka. Files, API responses and spreadsheets go through a landing zone that stores them exactly as received.
-- **Bronze:** everything lands in an append-only layer where every row carries the same tracking columns.
+- **Bronze:** everything lands in an append-only layer where every row carries the same tracking columns. PII is tokenised *before* bronze, so bronze and everything after it hold only tokens ([ADR 0025](docs/adr/0025-pii-storage-and-anonymisation.md)).
 - **Silver:** holds current-state tables built from CDC, and bitemporal fact tables built from files.
 - **Gold:** published only after its control totals match the source **to the paise**.
 - **Serving:** ClickHouse for dashboards (BI only), an online store (Cassandra, keyed by customer) for derived app reads, and Spark SQL for ad hoc and audit queries. Money that a customer sees is always read from the owning service, never from the lake.
@@ -51,7 +51,7 @@ The full design, with trade-offs, sizing, operations and an honesty section, is 
 |---|---|---|---|
 | **CDC into silver** | However changes arrive (late, twice, out of order), silver ends up exactly like the source. Deletes never come back. | [`cdc_merge.py`](src/cdp/cdc_merge.py) | [0012](docs/adr/0012-lsn-ordered-cdc-merge.md) |
 | **Partner files** | Retries, crashes, racing workers and corrected resends never double-count. Any past date can be reproduced "as known then". | [`file_ingest.py`](src/cdp/file_ingest.py) | [0013](docs/adr/0013-file-restatement-single-merge.md) |
-| **Publish gate** | Nobody, including the ClickHouse copy, sees a gold number that doesn't match the source exactly. | [`publish_gate.py`](src/cdp/publish_gate.py) | [0014](docs/adr/0014-write-audit-publish-gate.md) |
+| **Publish gate** | Nobody, including the ClickHouse and online-store copies, sees a gold number that doesn't match the source exactly. | [`publish_gate.py`](src/cdp/publish_gate.py) | [0014](docs/adr/0014-write-audit-publish-gate.md) |
 
 ## Tech stack
 
@@ -180,6 +180,8 @@ To prove the tests catch what they claim, each mechanism was also **broken on pu
 This is a design with working code for its hardest parts, not a deployed platform. The main gaps, all stated in the design's honesty section:
 
 - **ClickHouse:** the reconciliation SQL hasn't run against a real ClickHouse; only a fake client exercised it.
+- **Online store (Cassandra):** design only ([ADR 0019](docs/adr/0019-online-serving-store-for-app-reads.md)); the loader isn't built and capacity isn't load-tested.
+- **PII tokenisation service and vault:** design only ([ADR 0025](docs/adr/0025-pii-storage-and-anonymisation.md)); the throughput needed at 10k events/s isn't tested.
 - **No end-to-end CDC run:** the design hasn't been run with real Debezium and Postgres.
 - **No load test:** there has been no load test at 10k events/s.
 - **Designed but not coded:**

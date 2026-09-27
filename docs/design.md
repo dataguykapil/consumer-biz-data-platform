@@ -1,6 +1,6 @@
 # Consumer Data Platform — Lakehouse Design
 
-**Scope:** lending, insurance and recharge on one lakehouse. **Stack:** Iceberg + Polaris (REST catalog), Debezium + Kafka, Spark 4.1 (PySpark), ClickHouse (BI), Cassandra (app reads). **Code:** `src/cdp/` (371 executable lines), 33 tests (`make test`), [`test-plan.md`](test-plan.md).
+**Scope:** lending, insurance and recharge on one lakehouse. **Stack:** Iceberg + Polaris (REST catalog), Debezium + Kafka, Spark 4.1 (PySpark), ClickHouse (BI), Cassandra (app reads). **Code:** `src/cdp/` (441 executable lines after ruff's line wrapping; the logic is unchanged from the ~370 lines first written), 33 tests (`make test`), [`test-plan.md`](test-plan.md).
 
 ## 1. Summary
 
@@ -10,7 +10,7 @@ Most of this is a standard lakehouse. The effort goes into three places where a 
 
 1. **CDC into silver (§7.1).** Current-state tables must equal the source under redelivery, reordering and deletes. Where a source gives no usable ordering, the guarantee is weakened explicitly.
 2. **Partner files (§7.2).** Retries, crashes, racing workers and corrected resends must never double-count. Five years of history must stay queryable as it was known at any past time. A file fingerprint alone double-counts corrections. Iceberg time travel can't provide the history, because snapshots must be expired.
-3. **Publish gate (§7.3).** Nothing reaches a consumer, including the ClickHouse copy, until its control totals match the source exactly.
+3. **Publish gate (§7.3).** Nothing reaches a consumer, including the ClickHouse and online-store copies, until its control totals match the source exactly.
 
 **What the stack buys us:**
 - **One table format that every engine reads and writes:** Spark, ClickHouse, and Trino later if needed.
@@ -311,7 +311,7 @@ Each of the three parts below has code in `src/cdp/`. For each, every mechanism 
 
 ### 7.3 Publish gate: reconcile to the paise, then make it visible
 
-**Guarantee.** Consumers only see a gold snapshot whose totals per source and date exactly match every independent side. ClickHouse shows a version only after it reconciles to that same snapshot.
+**Guarantee.** Consumers only see a gold snapshot whose totals per source and date exactly match every independent side. ClickHouse shows a version only after it reconciles to that same snapshot. The online store loads only published snapshots and is checked afterwards (written counts and a sampled read-back). That's a weaker guarantee, because rows appear as they're written, not in one atomic switch (ADR 0019).
 
 **Why the obvious design fails.**
 - **"Write, then check"** lets people read unchecked numbers and leaves bad data in place.
@@ -375,6 +375,7 @@ Failure-by-failure recovery is in **Appendix B**. In short, bronze is always the
 - Whether every service can produce independent daily totals.
 - Whether "one snapshot per statement" holds on Polaris as it does locally.
 - The ClickHouse SQL, which has never run against a real ClickHouse.
+- The online store (ADR 0019), which is design only, with no code yet. Its capacity (a few thousand QPS at under 20 ms p99) is an assumption until load-tested.
 - The empty-version edge case in §7.2.
 
 **AI versus my decisions.**
@@ -383,6 +384,7 @@ I worked with Claude, first in chat and then in Claude Code. It drafted most of 
 
 *Decisions I made:*
 - The open stack, and ClickHouse for serving.
+- Moving app reads off ClickHouse onto an online store, after questioning the arrow from an analytics engine to customer screens (ADR 0019).
 - Postgres as the source and PySpark as the language.
 - Writing the design before the code.
 - Dropping Trino after I challenged whether it was needed.
@@ -435,7 +437,7 @@ That process caught these errors in the first drafts:
 
 ### Metrics, alerts and who gets paged
 
-Spark, Kafka and ClickHouse all expose Prometheus metrics: Spark through its `PrometheusServlet` sink, Kafka through the JMX exporter, and ClickHouse through its built-in endpoint. A scheduled Spark job reads Iceberg's metadata tables (`files`, `snapshots`) and turns them into table-health metrics.
+Spark, Kafka, ClickHouse and Cassandra all expose Prometheus metrics: Spark through its `PrometheusServlet` sink, Kafka and Cassandra through the JMX exporter, and ClickHouse through its built-in endpoint. A scheduled Spark job reads Iceberg's metadata tables (`files`, `snapshots`) and turns them into table-health metrics.
 
 Everything lands in Prometheus. Grafana draws the dashboards, and Alertmanager routes each alert by severity:
 - **P1:** page on-call now. Used for money correctness or a risk to production.
@@ -470,8 +472,8 @@ Quarantine counts, reconciliation verdicts and freshness together make a **per-t
   - *Tokens by default:* restricted columns are visible only as tokens. Turning a token back into a value goes through the vault service, which requires a stated purpose and is logged.
   - *Where rules live:* Polaris grants access per namespace and table. Row filters (for example, lending analysts see lending rows) and column masks are enforced by governed views in Spark SQL, and by ClickHouse row policies and column grants.
 - **Access requests and reviews.** Access is requested via a ticket, approved by the table owner, and time-limited. Grants are reviewed quarterly.
-- **Access audit.** Catalog access logs, Spark event logs and ClickHouse `system.query_log` are shipped to append-only storage, so "who read this table, and when?" has an answer for auditors.
+- **Access audit.** Catalog access logs, Spark event logs, ClickHouse `system.query_log` and Cassandra's audit log are shipped to append-only storage, so "who read this table, and when?" has an answer for auditors.
 - **Contract changes.** Contracts live as code in the repo. A breaking change needs sign-off from its consumers. For streams, Schema Registry compatibility rules enforce the same thing automatically.
-- **Discovery and glossary.** A catalog UI (for example DataHub or OpenMetadata), fed by Polaris and OpenLineage, lets people find tables, owners and lineage. Glossary terms link to the single gold definition of each metric.
+- **Discovery and glossary.** OpenMetadata ([ADR 0024](adr/0024-metadata-catalog-and-lineage.md)), fed by Polaris, OpenLineage and the contracts in git, lets people find tables, owners and lineage. Glossary terms link to the single gold definition of each metric.
 - **Data localisation.** All storage, compute and the DR region stay in Indian cloud regions. RBI's rules on payment-data storage and digital lending very likely require this for recharge and lending data. The exact scope needs confirming with compliance.
 - **Retention and legal hold.** Expiry jobs apply the retention policy for each table class. A legal hold overrides expiry for named records.
