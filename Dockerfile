@@ -4,7 +4,7 @@
 # JDK 21 is the newest LTS that Spark 4.1 supports (Spark 4.1 runs on Java 17/21).
 FROM eclipse-temurin:21-jre AS jre
 
-FROM python:3.14-slim-trixie
+FROM python:3.15-slim-trixie
 
 ARG ICEBERG_VERSION=1.11.0
 
